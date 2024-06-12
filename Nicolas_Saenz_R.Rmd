@@ -1,0 +1,291 @@
+---
+title: "Nicolas_Saenz_R"
+output: html_document
+date: "2024-04-07"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+## Introduction
+This backtesting study evaluates the performance of a risk-premium trading strategy designed to exploid positive
+risk premiums by comparing individual stock returns to the risk-free rate.
+The strategy generates long or short positions based on the sign of the calculated risk premium
+and it purchase one-month Treasury bills as a hedge. This report will assess the effectiveness
+of this strategy relative to two benchmarks: an equally-weighted portfolio of all stocks in
+the analysis and the QQQ ETF, which tracks the S&P 100 index.
+
+```{r Intro, include=FALSE}
+# Load required libraries
+#install.packages(c("quantmod", "lubridate", "zoo", "PerformanceAnalytics", "vctrs", "ggplot2", "reshape2"))
+suppressPackageStartupMessages(require("quantmod"))
+suppressPackageStartupMessages(require("lubridate"))
+suppressPackageStartupMessages(require("zoo"))
+suppressPackageStartupMessages(require("PerformanceAnalytics"))
+suppressPackageStartupMessages(require("ggplot2"))
+suppressPackageStartupMessages(require("reshape2"))
+suppressPackageStartupMessages(require("knitr"))
+suppressPackageStartupMessages(require("xts"))
+
+# Set analysis date
+date <- Sys.Date() - 1
+daytoday <- format(date, "%Y%m%d")
+```
+
+### Some Comments about the data:
+Stocks: The analysis covers a comprehensive list of stocks including popular technology companies such as AAPL, MSFT, AMZN,
+and others for a time period of 5, in a daily basis, totaling over a hundred constituents and yielding a list of "stocks" that we will consider our universe.
+Stock price data is sourced from the YahooFinance API. Additionally, one-month Treasury bill rates are obtained from FRED, serving as the risk-free rate for the analysis.
+
+```{r Benchmarks}
+# Define Benchmark and stock universe
+benchmark <- "QQQ"
+stocks <- c("AAPL", "MSFT", "AMZN", "NVDA", "META", "TSLA", "GOOGL", "GOOG", "AVGO",
+            "PEP", "COST", "ADBE", "CSCO", "NFLX", "AMD", "CMCSA", "TMUS", "TXN", "INTC",
+            "HON", "QCOM", "INTU", "AMGN", "AMAT", "ISRG", "SBUX", "MDLZ", "BKNG", "GILD",
+            "ADI", "VRTX", "ADP", "REGN", "LRCX", "PANW", "PYPL", "MU", "CSX", "SNPS",
+            "KLAC", "ASML", "CDNS", "MNST", "MELI", "ORLY", "FTNT", "MAR", "ABNB", "CHTR",
+            "NXPI", "MRVL", "CTAS", "DXCM", "MRNA", "LULU", "WDAY", "MCHP", "KDP", "KHC",
+            "AEP", "ADSK", "CPRT", "PDD", "AZN", "PCAR", "BIIB", "EXC", "IDXX", "PAYX", "ON",
+            "ROST", "ODFL", "CSGP", "GEHC", "XEL", "EA", "FAST", "GFS", "VRSK", "CRWD", "CTSH",
+            "DLTR", "BKR", "ILMN", "CEG", "WBD","DDOG", "ANSS", "WBA", "ALGN", "TEAM", "EBAY",
+            "FANG", "ENPH", "ZS", "ZM", "JD", "SIRI", "LCID")
+
+# Combining Benchmark and stocks for data fetching
+ticker_vec <- c(benchmark, stocks)
+# Download Stock Data for 5 Years avoiding overloading the API
+if (file.exists("data_project_R.RData")) {
+  load("data_project_R.RData")
+} else {
+  data <- do.call(merge, lapply(as.list(ticker_vec), function(x) {
+    if ((which(x == ticker_vec) %% 30) == 0) Sys.sleep(3)
+    df <- Cl(getSymbols(Symbols = x, from = "2024-04-14" - lubridate::years(5), auto.assign = FALSE))
+    colnames(df) <- gsub(".Close", "", names(df))
+    df
+  }))
+  save(data, file = "data_project_R.RData")
+}
+# Calculate Daily Returns
+returns <- ROC(data)
+
+```
+## Benchmarks
+#### QQQ ETF:
+The QQQ ETF was chosen as a benchmark due to its representation in the large-cap technology world and growth stocks in the Nasdaq-100.
+Using it as a benchmark allows for comparison of the risk-premium strategy's performance against a market-weighted index of
+leading technology and fast growing stocks. Moreover, it is funny to play, see and think that one may get a better alpha than QQQ
+(Honestly I wanted not only to beat the market, but to beat some good players)
+
+### Equally-Weighted Portfolio:
+The equally-weighted portfolio serves as a benchmark to evaluate the performance of the risk-premium strategy against
+a simple and diversified portfolio construction method. Each stock in the universe is assigned to an equal weight,
+regardless of its market capitalization or other fundamental factors. It is helpful to asses whether the risk-premium strategy
+generates superior risk-adjusted returns compared to a diversified portfolio with equal exposure to all stocks and generates
+excess return beyond what can be achieved through a basic diversification approach.
+
+For the risk free rate we will be using CAPM to calculate monthly risk premiums since it is the measure of how much the asset's
+performance differs from the risk free rate. Positive risk premiums suggest that a stock's return exceeds what would be expected
+given its level of risk, while negative risk premium generally indicates that the investment is a bad investment and the money
+should be allocated to the risk free asset or to a different asset with a higher risk premium.
+```{r RiskPremiums }
+
+# Weights for equally-weighted portfolio
+weights <- rep(1/length(stocks), length(stocks))
+portfolio_returns <- rowSums(returns * weights, na.rm = TRUE)
+returns$equally <- as.numeric(portfolio_returns)
+# Fetch 1-Month Treasury Bill Rate as the Risk-Free Rate
+getSymbols.FRED(Symbols = "DGS1MO", env = .GlobalEnv)
+risk_free_rate <- na.locf(DGS1MO)
+# Convert Rate to Daily & Subset for Matching Length
+risk_free_rate <- risk_free_rate / 100 / 360
+risk_free_rate <- risk_free_rate[index(data)]
+data_with_r <- merge(returns, risk_free_rate)
+data_with_r[is.na(data_with_r)] <- 0
+# Calculate Monthly Risk Premiums via CAPM
+risk_premium <- apply.monthly(returns, FUN = function(x)
+  PerformanceAnalytics::CAPM.RiskPremium(Ra = x, Rf = data_with_r$DGS1MO))
+
+```
+## Metrics
+Performance metrics such as average return, volatility, Sharpe ratio, and maximum drawdown are monitored
+to assess the effectiveness of the strategy and make any necessary adjustments, since the strategy aims to
+rebalance the portfolio regularly, typically on a monthly basis adjusting positions based on updated
+risk premiums and market conditions.
+
+```{r Metrics}
+calculate_performance_metrics <- function(returns) {
+  sharpe <- PerformanceAnalytics::SharpeRatio(returns, Rf = risk_free_rate, annualize = TRUE)
+  metrics <- list(
+    "Avg_Return" = mean(returns, na.rm = TRUE),
+    "Geo_Return" = PerformanceAnalytics::Return.cumulative(returns),
+    "Volatility_(Stdev)" = sd(returns, na.rm = TRUE),
+    "StdDev_Sharpe" = sharpe[1,1],
+    "VaR_Sharpe" = sharpe[2,1],
+    "ES_Sharpe" = sharpe[3,1],
+    "Sortino_Ratio" = PerformanceAnalytics::SortinoRatio(returns, Rf = risk_free_rate, annualize = TRUE),
+    "Max_Drawdown" = PerformanceAnalytics::maxDrawdown(returns),
+    "Beta" = PerformanceAnalytics::CAPM.beta(returns, data_with_r[,1], Rf = risk_free_rate), # 1st column is benchmark
+    "Fama-French_Alpha" = PerformanceAnalytics::CAPM.alpha(returns, data_with_r[,1],  Rf = risk_free_rate)
+  )
+
+  return(metrics)
+} #output the metrics used to analyze deeper.
+
+```
+## Risk-Premium Strategy
+The risk-premium trading strategy utilizes the Capital Asset Pricing Model (CAPM) to calculate the expected
+excess return of individual stocks over the risk-free rate. Trading signals are generated based on the sign of the risk premium:
+1) Positive risk premium: Long position
+2) Negative risk premium: Short position and investment in 1-month Treasury Bills as a hedge against market downturns or negative risk premiums
+We also generate some more simple signals like longing the stokes and the bill and shorting the stock.
+In general, the position allocation is as follows:
+- When long signal generated, the strategy allocates capital to holding the stock
+- If short signal generated the strategy may either short the stock or allocate capital to purchasing one-month
+Treasury bills, depending on the risk appetite and market conditions.
+- We play with 50-50 allocation when shorting the stock and purchasing Treasury bills, this is a free parameter to finetune
+- In the following code we set the algorithm for the signals and then we proceed to plot the chart "PerformanceSummary"
+- that will tell us how well the strategy performed.
+```{r signals, warning=FALSE}
+risk_premium_trading <- function(stock) {
+  # Merge Stock Data (returns), Benchmark, Risk Premium, and Risk-Free Rate
+  single_stock_merged <- na.locf(merge(data_with_r[, benchmark], data_with_r[, stock], data_with_r[, "equally"], risk_premium[, stock]))
+  colnames(single_stock_merged) <- c(benchmark, "stock", "equally" ,"risk_premium")
+  single_stock_data <- single_stock_merged
+  # Generate Trading Signals (Long: +1, Short: -1)
+  single_stock_data$signal <- ifelse(single_stock_data$risk_premium < 0, -1, 1)
+  # Add Risk-Free Rate
+  single_stock_data$Rf <- data_with_r$DGS1MO
+  # Calculate Returns Based on Signal
+  single_stock_data$long_return_stk <- ifelse(single_stock_data$signal == 1,
+                                       single_stock_data$stock * single_stock_data$signal, 0)
+  single_stock_data$short_return_stk <- ifelse(single_stock_data$signal == -1,
+                                        single_stock_data$stock * single_stock_data$signal, 0)
+  single_stock_data$long_return_bill <- 0
+  # Calculate Return on 1-Month Treasury Bill (When Stock Position is Short)
+  eps <- endpoints(single_stock_data, on = "months")
+  single_stock_data[eps, "long_return_bill"] <- ifelse(single_stock_data[eps, "signal"] == -1, as.numeric(single_stock_data[eps, "Rf"]) * 28, 0)
+  # Allocation Strategy
+  single_stock_data$long_stk_long_bill <- single_stock_data$long_return_stk + single_stock_data$long_return_bill
+  single_stock_data$short_return_stk <- single_stock_data$short_return_stk * 0.6
+  single_stock_data$long_return_bill <- single_stock_data$long_return_bill * 0.4
+  # Total Return Calculation
+  single_stock_data$total_return <- as.numeric(single_stock_data$long_return_stk +
+                                        single_stock_data$short_return_stk +
+                                        single_stock_data$long_return_bill)
+  # Plot Cumulative Returns
+  options(repr.plot.width =9, repr.plot.height =15)
+  charts.PerformanceSummary(
+    merge(single_stock_data$stock,
+          single_stock_data[, c(benchmark, "long_return_stk", "short_return_stk",
+                         "long_return_bill", "total_return", "long_stk_long_bill", "equally")]),
+    geometric = FALSE, cex.legend = 0.5,
+    main = paste0("Risk-Premium Trading: ", stock), lwd = 0.5
+  )
+  return(single_stock_data)
+} #output the returns in order to get the metrics and data for backtesting-return plots
+
+```
+Portfolio Management and Interpretation:
+
+The strategy aims to rebalance the portfolio regularly, typically on a monthly basis to adjust positions based on the updated
+risk premiums and market conditions. Performance metrics such as average return, volatility, Sharpe ratio, and maximum
+drawdown are monitored to assess the effectiveness of the strategy and make any necessary adjustments. The shapiro test for normality is implemented to check for
+normality in the returns. I had also considered increase allocation strategically to top performers and reduce or eliminate positions in persistent underperformers,
+but i wanted to see how the strategy works without a montlhy or weekly dynamic allocation excercise given that regular rebalancing (e.g., monthly)
+can enhance portfolio adaptability to market dynamics.
+Let's see what the charts tell us about these strategies and how the analysis panned out;
+The Big Picture (Cumulative Return):  Usually total gains are the priority and hence the long-only strategy has to come out on top, followed by short-only.
+The long-short combo lagged behind a bit, and the equally-weighted approach was really close with the long-only strategy.
+The Daily returns (Volatility):  As expected, day-to-day price action was way more volatile compared to the overall gains.
+Again, the long-only strategy won, followed by short-only. Long-short and equally-weighted were smoother rides.
+
+
+```{r Portfolio, out.width="100%", out.height = "200%", fig.keep='first'}
+stocks_to_analyze <- stocks
+results_list <- list()
+for (stock in stocks_to_analyze) {
+  stock_data <- risk_premium_trading(stock)
+  returns_ind <- stock_data$total_return
+  performance_metrics <- calculate_performance_metrics(returns_ind)
+  returns_ind <- as.numeric(na.omit(returns_ind))
+  shapiro_test_result <- shapiro.test(returns_ind)
+  results_list[[stock]] <- performance_metrics
+  results_list[[stock]]$p.value <- shapiro_test_result$p.value
+}
+
+```
+Read Alert (Drawdown):  The long-only strategy had the roughest patch when prices dipped, short-only came in second.
+Interestingly the long-short strategy did not had such a bad time, while the equally-weighted strategy mirrored the long-only approach in terms of dip severity.
+
+# Results and comments:
+
+Let's take a look at the Sortino Ratio and let's filstrate in order to get the top 10 under this metric.
+Unfortunately a significant portion of the stocks seem to have negative Sortino Ratios. This indicates that on a risk-adjusted basis
+these stocks underperform the risk-free rate. Some stocks might have lower Sortino Ratios due to inherently higher volatility, even if they offer potentially higher returns.
+We conclude then that by the Sortino Ratio, our wiining stocks are: META (0.11576196), CEG (0.09939963), and CRWD (0.09633328) emerge as the frontrunners
+for risk-adjusted returns based on the Sortino Ratio (you can always check the commulative distr. from the ticker you want in my code, provided it is in my universe). Moreover, the strategy's Sortino Ratio () is currently lower than the QQQ ETF's Sortino Ratio. This suggests that the QQQ ETF demonstrates better risk-adjusted returns than your equally-weighted portfolio.
+
+Beta Analysis:
+
+The Beta data includes the "equally" weighted portfolio at 0.91, which serves as a benchmark for overall market volatility.
+Several stocks, including NVDA (0.6752403), ENPH (0.5809839), AMAT (0.5600319), and CEG (0.4477205), exhibit lower Betas than the market,
+implying potentially less volatile price movements compared to the broader market.
+These stocks could be suitable for reducing portfolio volatility, especially if they maintain attractive return potentials.
+
+French Alpha:
+
+CRWD (0.0017973724), ENPH (0.0015536644), META (0.0014328588), and ALGN (0.0014205231) all boast positive French Alpha values, while the benchmark
+equally had a negative almost cero alpha. This indicates that their returns outperform what could be expected based solely on their beta exposure to the market. These stocks might be interesting candidates for an actively managed portfolio seeking alpha.
+Refining the Strategy
+
+```{r}
+equally_metrics <- calculate_performance_metrics(returns$equally)
+QQQ_metrics <- calculate_performance_metrics(returns$QQQ)
+shapiro_test_result <- shapiro.test(as.numeric(returns$equally)) #normality
+results_list[["equally"]] <- equally_metrics
+results_list[["equally"]]$p.value <- shapiro_test_result$p.value
+results_df <- do.call(rbind.data.frame, results_list)
+data_order_sor <- results_df[order(-results_df$Sortino_Ratio), ]["Sortino_Ratio"]
+data_order_beta <- results_df[order(-results_df$Beta), ]["Beta"]
+data_order_fama <- results_df[order(-results_df$Fama.French_Alpha), ]["Fama.French_Alpha"]
+QQQ_sor <- QQQ_metrics$Sortino_Ratio[1]
+equally_sor <- equally_metrics$Sortino_Ratio[1]
+print(c("Equally: ",equally_sor, "QQQ:", QQQ_sor))
+head(data_order_sor)
+head(data_order_beta)
+head(data_order_fama)
+```
+# Conclusion:
+The analysis of the risk-premium trading strategy indicates mixed performance outcomes, with both areas of potential aspects requiring refinement:
+Outperformance (mild): The strategy's ability to outperform the QQQ ETF in terms of risk-adjusted returns (as measured by the Sortino Ratio) could be a promising sign.
+This suggests that the strategy can successfully identify stocks within the technology sector that offer superior risk-reward profiles.
+Underperformance (Risk): A notable portion of the portfolio exhibited Sortino Ratios lower than the equally-weighted benchmark and even negative values.
+This tells that the strategy does not ensure superior performance across all assets and further optimization is more than necessary.
+
+Potential Areas for Improvement:
+
+Risk premium calculation:
+Re-evaluate how do I compute risk premiums. Experimenting with different timeframes or consider alternative risk premium models should give me a better exposure.
+
+Regarding risk management it is good to explore new strategies to mitigate the impact of negative risk premiums: setting fixed thresholds for shorting stocks,
+increasing the allocation to treasury bills when short positions are taken, incorporating additional hedging techniques to offset downside risk.
+
+Since the majority of my stocks have Sortino Ratios below both benchmarks (and many are negative),
+it indicates that the overall portfolio composition is likely underperforming on a risk-adjusted basis. It then suggests to me
+that the risk-premium strategy might have merit in identifying specific outperformers and then continue with a deeper analysis.
+
+In general the preliminary analysis suggests that the risk-premium strategy holds some merit as evidenced by the outperformance of certain stocks compared to the QQQ benchmark and the equally one.
+However, it has many underperforming assets so it still needs more refinement to achieve consistent positive risk-adjusted returns and outperform the market!
+</style>
+
+Bibliography:
+- Chris Conlan - Automated Trading with R_ Quantitative Research and Platform Development-Apress, Berkeley, CA (2016)
+- Georgakopoulos, H - Quantitative trading with r_ understanding mathematical and computational tools from a quant's perspective-Palgrave Macmillan (2016)
+- John Wiley & Sons Inc - Modern Portfolio Theory and Investment Analysis
+- Bacon, Carl. Practical Portfolio Performance Measurement and Attribution. Wiley Finance.
+- https://www.investopedia.com/
+- Gemini and LLama2 were consulted and used as part of my research tools.
+
+```
